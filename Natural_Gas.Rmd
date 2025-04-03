@@ -1,0 +1,353 @@
+---
+title: "Natural Gas Project"
+author: "Fatemeh Khosravi & Dennis Myasnyankin"
+date: "2022-12-1"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(reticulate)
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+library(fpp2)
+library(zoo)
+library(readr)
+library(forecast)
+library(dplyr)
+library(caret)
+library(tidyr)
+library(imputeTS)
+library(lubridate)
+library(Metrics)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r global.options, include=FALSE}
+knitr::opts_chunk$set(
+  cache = TRUE,
+  fig.align = 'center',
+  fig.path = 'figs/',
+  echo = TRUE,
+  message = FALSE,
+  strip.white = TRUE,
+  warning = FALSE
+)
+```
+
+**Final Project**
+
+```{r}
+
+# Load in the data set and convert Data
+
+gas.daily= read_csv("daily_csv.csv",
+                      col_types = cols(Date = col_date(format = '%Y-%m-%d')))
+
+# Set seed for reproducibility
+
+set.seed(21)
+
+# Explore initial data set
+
+plot(gas.daily , ylab='Price (Dollars)', main='Time Plot of Daily Natural Gas Price', 
+                    xlab='Time', type='l', ylim=c(0,20.1))
+```
+
+```{r}
+# Check for missing values
+
+missingValsCount <- sum(is.na(gas.daily))
+missingValIndices <- unique (unlist (lapply (gas.daily, function (x) which (is.na (x)))))
+cat("There is a total of ", missingValsCount, " missing value(s) in the data frame.")
+
+# List missing values
+
+print(gas.daily[missingValIndices,])
+```
+
+From the initial exploration above, we can observe that there is 1 missing value present in the data set. The column associated with the null value is "Price", which was unable to be gathered by the source for 01/05/2018. Since gaps within time series forecasting may lead to sub optimal performance, we will address this issue through imputation. 
+
+```{r}
+# Impute via forecast package
+
+gas.daily.df <- gas.daily
+gas.daily.df$Price <- na.interp(gas.daily.df$Price)
+
+cat("The imputed price for 2018-01-05 is: ", 
+    gas.daily.df[missingValIndices,]$Price, 
+    "\nThe new working data set now has: ", 
+    sum(is.na(gas.daily.df)), " missing value(s).")
+```
+
+```{r}
+# Add month, year, weekday columns to df using lubridate package
+
+gas.daily.df <- gas.daily.df %>%
+  mutate(Month = month(gas.daily.df$Date)) %>% 
+  mutate(Year = year(gas.daily.df$Date)) %>% 
+  mutate(Week_Day = weekdays(gas.daily.df$Date))
+
+#head(gas.daily.df, 1000)
+
+```
+
+```{r, fig.width=5,fig.height=7}
+# Calculate the average price for each month
+
+monthYearBreakdown <- gas.daily.df %>%
+  group_by(Month, Year) %>%
+  summarise(Monthly_Avg = mean(Price))
+
+
+# Plot histograms of prices of Month
+
+gas.daily.df %>%
+  ggplot(aes(x=Price)) + geom_histogram(bins = 10) +
+  facet_wrap(~ Year, ncol = 4) +
+      labs(title = "Monthly Natural Gas Price Distribution by Year",
+           y = "Price (USD)",
+           x = "Month") + theme_bw(base_size = 10)
+```
+
+
+
+
+```{r}
+# Aggregate daily price to monthly price
+
+gas.monthly = gas.daily.df %>%
+   mutate(Month = format(Date, '%Y-%m'))  %>%
+   group_by(Month = format(Date , '%Y-%m')) %>%
+   summarise(Price = round(mean(Price), 2))
+
+# Drop last value
+
+gas.monthly = gas.monthly[-c(285), ]   
+```
+
+```{r}
+# Create daily and monthly time series
+
+price.daily <- ts(gas.daily.df$Price, start = c(1997,1) , end = c(2020,8), frequency = 12)
+price.monthly <- ts(gas.monthly$Price, start = c(1997,1) , end = c(2020,8), frequency = 12)
+
+# Plot daily and monthly time series 
+
+par(mfrow=c(2,1))
+daily.plot <- plot(price.daily, ylab = "Price ( Dollars)",
+     main = "Time Plot of Daily Natural Gas Prices")
+monthly.plot <- plot(price.monthly, ylab = "Price ( Dollars)",
+     main = "Time Plot of Monthly Natural Gas Prices")
+```
+
+```{r}
+# Create moving average of monthly data for trend analysis
+
+price.monthly.centered = ma(price.monthly, order = 12)
+
+autoplot(price.monthly, series="Actual", 
+        main=" Centered Moving Average with Window=12, Overlaid on Monthly Gas Price",
+        ylab="Price (Dollars)")+
+  autolayer(price.monthly.centered, series= "CenteredAvg")+
+  theme_classic()
+```
+
+Plotting the centered moving average over the original data provides us with an idea of where certain points tend to lie within the time series, giving an idea of the level associated with the monthly natural gas price. However, it is hard to understand the trend and seasonality still needs to be examined.
+
+
+```{r}
+# Differencing 
+
+detrended.ts <- diff(price.monthly, lag = 1)
+deseasoned.ts <- diff(price.monthly, lag = 12)
+twice.differenced.ts <- diff(diff(price.monthly, lag=12), lag=1)
+
+# Plots for systematic component analysis: level, trend, seasonality
+
+layout(matrix(c(1,1,2,3,4,5), 3, 2, byrow = TRUE))
+
+acf.plt <- Acf(price.monthly , lag.max = 240, 
+               main = "Autocorrelation Plot of Monthly Gas Prices")
+original.plt <- plot(price.monthly, ylab = "Price (Dollars)", 
+                     main = "Original Monthly Gas TS")
+detrended.plt <- plot(detrended.ts, ylab = "Price (Dollars)", 
+                      main = "De-Trended Monthly Gas TS")
+deseasoned.plt <- plot(deseasoned.ts, ylab = "Price (Dollars)", 
+                       main = "De-Seasoned Monthly Gas TS")
+twice.differenced.plt <- plot(twice.differenced.ts, ylab = "Price (Dollars)",
+                              main = "Twice Differenced Monthly Gas TS")
+```
+
+The plots above depict the Autocorrelation Function...
+
+```{r}
+# Create benchmark model with forecast package's naive() function
+
+fixed.nValid <- 20
+fixed.nTrain <- length(price.monthly) - fixed.nValid
+train.ts <- window(price.monthly, start = c(1997, 1), end = c(1997, fixed.nTrain))
+valid.ts <- window(price.monthly, start = c(1997, fixed.nTrain + 1), 
+                   end = c(1997, fixed.nTrain + fixed.nValid))
+naive.model <- naive(train.ts, h = fixed.nValid)
+
+print(naive.model)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+# Apply exponential smoothing using ets()
+
+  # ZZZ -> Auto-selected Errors, Auto-selected Trend, Auto-selected Seasonality
+
+model.ets <- ets(train.ts, model = "ZZZ", restrict = FALSE, 
+                 allow.multiplicative.trend = TRUE)
+
+summary(model.ets)
+
+# Generate forecasts
+
+ets.pred = forecast(model.ets, h=fixed.nValid)
+
+# Get RMSE on the validation period
+
+ets.rmse <- rmse(valid.ts, ets.pred$mean)
+cat("\nETS Validation Set RMSE: ", ets.rmse)
+
+# Create Plot
+
+autoplot(train.ts, series = "Training", ylab = 'Price (Dollars)', xlab = 'Time', 
+         bty = "l", xaxt = "n", flty= 2,
+         main = "Forecasted Monthly Gas Price using Exponential Smoothing") +
+  autolayer(valid.ts, series = "Actual") +
+  autolayer(ets.pred, series = "ETS Forecast", alpha = 0.3) +
+  coord_cartesian(xlim = c(2015, 2021))
+```
+
+The exponential smoothing function returns a model with the following ETS parameters (M,N,N). Suggesting multiplicative error, no trend, and no seasonality within the data set. This could mean we should look into a smaller portion of the time series (for instance, spanning 10 years instead of 20) in order for trend and seasonality to be applicable.
+
+
+```{r}
+# Model Linear Regression
+
+model.lm = tslm(train.ts ~ trend + I(trend ^2)+I(trend ^3)+season)
+summary(model.lm)
+
+# Generate forecasts
+
+lm.pred = forecast(model.lm, h = fixed.nValid)
+
+# Get RMSE on the validation period
+
+lm.rmse <- rmse(valid.ts, lm.pred$mean)
+cat("\nLinear Regression Validation Set RMSE: ", lm.rmse)
+
+# Create Plot
+
+autoplot(train.ts, series = "Training", ylab = 'Price (Dollars)', xlab = 'Time', 
+         bty = "l", xaxt = "n", flty= 2,
+         main = "Forecasted Monthly Gas Price using Linear Regression") +
+  autolayer(valid.ts, series = "Actual") +
+  autolayer(lm.pred, series = "Linear Regression Forecast", alpha = 0.3) +
+  coord_cartesian(xlim = c(2015, 2021))
+
+```
+
+
+```{r}
+# Model ARIMA Automatically
+
+model.auto = auto.arima(train.ts)
+summary(model.auto)
+
+# Generate forecasts
+
+auto.pred = forecast(model.auto, h = fixed.nValid)
+
+# Get RMSE on the validation period
+
+auto.rmse <- rmse(valid.ts, auto.pred$mean)
+cat("\nAuto Arima Validation Set RMSE: ", auto.rmse)
+
+# Create Plot
+
+autoplot(train.ts, series = "Training", ylab = 'Price (Dollars)', xlab = 'Time', 
+         bty = "l", xaxt = "n", flty= 2,
+         main = "Forecasted Monthly Gas Price using Auto ARIMA") +
+  autolayer(valid.ts, series = "Actual") +
+  autolayer(auto.pred, series = "Auto ARIMA Forecast", alpha = 0.4) +
+  coord_cartesian(xlim = c(2015, 2021))
+```
+
+```{r}
+# Model ARIMA Manually
+
+model.arima = arima(train.ts, order=c(6,2,2), seasonal = c(2,1,1))
+summary(model.arima)
+
+# Generate forecasts
+
+arima.pred = forecast(model.arima, h = fixed.nValid)
+
+# Get RMSE on the validation period
+
+arima.rmse <- rmse(valid.ts, arima.pred$mean)
+cat("\nManual Arima Validation Set RMSE: ", arima.rmse)
+
+# Create Plot
+
+autoplot(train.ts, series = "Training", ylab = 'Price (Dollars)', xlab = 'Time', 
+         bty = "l", xaxt = "n", flty= 2,
+         main = "Forecasted Monthly Gas Price using Manual ARIMA") +
+  autolayer(valid.ts, series = "Actual") +
+  autolayer(arima.pred, series = "Manual ARIMA Forecast", alpha = 0.4) +
+  coord_cartesian(xlim = c(2015, 2021))
+```
+
+```{r}
+# Model Neural Nets
+
+model.nnet = nnetar(train.ts, p = 6, P = 2, size = 5)
+summary(model.nnet)
+
+# Generate forecasts
+
+nnet.pred = forecast(model.nnet, h = fixed.nValid)
+
+# Get RMSE on the validation period
+
+nnet.rmse <- rmse(valid.ts, nnet.pred$mean)
+cat("\nNeural Net Validation Set RMSE: ", nnet.rmse)
+
+# Create Plot
+
+autoplot(train.ts, series = "Training", ylab = 'Price (Dollars)', xlab = 'Time', 
+         bty = "l", xaxt = "n", flty= 2,
+         main = "Forecasted Monthly Gas Price using Neural Networks") +
+  autolayer(valid.ts, series = "Actual") +
+  autolayer(nnet.pred, series = "Neural Net Forecast", alpha = 0.4) +
+  coord_cartesian(xlim = c(2015, 2021))
+```
+
+
+
+
+```{r}
+#no seasonal difference
+pacf(train.ts, lag.max = 60, main=" No Differencing")
+acf(train.ts, lag.max = 144,main=" No Differencing")
+
+#one seasonal difference 
+pacf(diff(train.ts, lag=12), lag.max = 60,main=" One Seasonal Difference")
+acf(diff(train.ts, lag=12), lag.max = 60,main=" One Seasonal Difference")
+
+# two regular difference
+pacf(diff(diff(diff(train.ts, lag=12))), lag.max = 60,
+     main=" One Seasonal Difference and Two Regular Difference")
+acf(diff(diff(diff(train.ts, lag=12))), lag.max = 60,
+     main=" One Seasonal Difference and Two Regular Difference")
+```
