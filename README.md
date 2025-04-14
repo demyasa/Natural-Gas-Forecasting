@@ -8,16 +8,10 @@ the energy portfolio of the world's consumers. The analysis conducted in this st
 
 ## Repository Contents
 
-### Files used to create final dataset:
-
-`test.csv`
-`train.csv`
-`AirlineDataMiningFinal.ipynb`
-
 ### Core Project files
 
-`newAirlines.csv`
-`AirlinesFinal.Rmd`
+`daily_csv.csv`
+`Natural_Gas.Rmd`
 
 ## Methods
 
